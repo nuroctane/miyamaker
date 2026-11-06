@@ -20,6 +20,10 @@ export type PoolKind = (typeof KIND)[keyof typeof KIND]
 export const MODE = { TARGETED: 0, RANDOM: 1 } as const
 export type PoolMode = (typeof MODE)[keyof typeof MODE]
 
+/** Robinhood Chain's block hashes come from its sequencer, so the factory refuses Random pools there. */
+export const modesOn = (chainId: number): PoolMode[] =>
+  chainId === 4663 ? [MODE.TARGETED] : [MODE.TARGETED, MODE.RANDOM]
+
 export const MODE_LABEL: Record<PoolMode, string> = { 0: 'Pick', 1: 'Random' }
 export const MODE_HINT: Record<PoolMode, string> = {
   0: 'You choose which NFT you get.',
@@ -94,11 +98,23 @@ export function parseTokenIds(input: string): { ids: bigint[]; error?: string } 
  *  - ERC721, several: pool.deposit, which needs the pool approved to move them (one-time setApprovalForAll).
  * The pool mints the tokens in its receive hook in every case.
  */
-export type DepositPlan = 'transfer-721' | 'transfer-1155' | 'approve' | 'deposit'
+/**
+ * Quotrons and Chain Mancers, the Robinhood Chain collections we list, refuse transfers by an approved operator, so
+ * approve-then-deposit reverts there (checked on a fork, 2026-11-06). Sending straight to the pool works, one at a time.
+ */
+export const directSendOnly = (chainId: number) => chainId === 4663
 
-export function depositPlan(kind: PoolKind, count: number, approvedForAll: boolean | undefined): DepositPlan {
+export type DepositPlan = 'transfer-721' | 'transfer-721-each' | 'transfer-1155' | 'approve' | 'deposit'
+
+export function depositPlan(
+  kind: PoolKind,
+  count: number,
+  approvedForAll: boolean | undefined,
+  directOnly = false,
+): DepositPlan {
   if (kind === KIND.ERC1155) return 'transfer-1155'
   if (count <= 1) return 'transfer-721'
+  if (directOnly) return 'transfer-721-each'
   return approvedForAll ? 'deposit' : 'approve'
 }
 
@@ -156,7 +172,7 @@ export function filterPools<T extends PoolSummary>(pools: T[], query: string): T
   const q = query.trim().toLowerCase()
   if (!q) return pools
   return pools.filter((p) =>
-    [p.symbol, p.name, p.collectionName || '', p.address, p.collection].some((s) => s.toLowerCase().includes(q))
+    [p.symbol, p.name, p.collectionName || '', p.address, p.collection].some((s) => s.toLowerCase().includes(q)),
   )
 }
 
