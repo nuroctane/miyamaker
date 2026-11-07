@@ -1,7 +1,5 @@
 import { useConnectModal } from '@rainbow-me/rainbowkit'
 import { useEffect, useState } from 'react'
-import styled from 'styled-components/macro'
-import { useElementSize } from 'usehooks-ts'
 import type { Address, Hash } from 'viem'
 import {
   useAccount,
@@ -12,34 +10,20 @@ import {
   useWriteContract,
 } from 'wagmi'
 
-import LoadingHourglass from '@/assets/loading_hourglass.gif'
 import NftImage from '@/components/NftImage'
-import {
-  BigButton,
-  Chip,
-  DisplayTitle,
-  Eyebrow,
-  Panel,
-  ProgressMeter,
-  Skeleton,
-  StatRow,
-  StatusBox,
-  Stepper,
-  Well,
-} from '@/components/Retro'
 import type { SupportedChainId } from '@/config/wagmi'
 import { explorerUrl } from '@/config/wagmi'
 import ArtistTag from '@/pages/Mint/ArtistTag'
-import BackToMints from '@/pages/Mint/BackToMints'
-import { StatusChip } from '@/pages/Mint/Home'
 import type { LiveMintCard } from '@/pages/Mint/liveMints'
 import { formatEthShort, toCard } from '@/pages/Mint/liveMints'
+import type { MachineStatus } from '@/pages/Mint/handheld/MintCart'
+import MintCart from '@/pages/Mint/handheld/MintCart'
+import { statusLamp } from '@/pages/Mint/handheld/status'
 import MintNeeds from '@/pages/Mint/MintNeeds'
 import { erc721mAbi } from '@/pages/Mint/Miyamini/abi'
 import { describeError } from '@/pages/Mint/Miyamini/useMiyamini'
 import type { ReadResult } from '@/pages/Mint/useLiveMints'
 import { dropAbi, dropCalls, erc721mCalls, readsFromResults, useContractImage } from '@/pages/Mint/useLiveMints'
-import { color, space, text } from '@/theme/tokens'
 
 /**
  * Generic mint view for any live mint that has no dedicated page: legacy ERC721M clones (mint(amount)) and miyamints
@@ -47,65 +31,6 @@ import { color, space, text } from '@/theme/tokens'
  */
 
 const MAX_PER_TX = 10
-
-const Layout = styled.div`
-  height: 100%;
-  overflow-y: auto;
-  overflow-x: hidden;
-`
-
-const Grid = styled.div`
-  display: grid;
-  grid-template-columns: minmax(0, 1.05fr) minmax(0, 1fr);
-  grid-template-areas:
-    'head head'
-    'preview mint';
-  gap: ${space[4]};
-  padding: ${space[4]};
-  max-width: 980px;
-  margin: 0 auto;
-  .narrow & {
-    grid-template-columns: minmax(0, 1fr);
-    grid-template-areas: 'head' 'preview' 'mint';
-    gap: ${space[3]};
-    padding: ${space[3]};
-  }
-`
-
-const Head = styled.header`
-  grid-area: head;
-  display: flex;
-  align-items: flex-end;
-  justify-content: space-between;
-  flex-wrap: wrap;
-  gap: ${space[2]} ${space[4]};
-`
-
-const Muted = styled.p`
-  margin: 0;
-  font-size: ${text.sm};
-  color: ${color.inkMuted};
-  line-height: 1.5;
-`
-
-const Details = styled(Well)`
-  padding: ${space[2]} ${space[3]};
-  display: flex;
-  flex-direction: column;
-  gap: 2px;
-  font-size: ${text.xs};
-  > div {
-    display: flex;
-    justify-content: space-between;
-    gap: ${space[2]};
-  }
-  > div > span:first-child {
-    color: ${color.inkMuted};
-  }
-  a {
-    color: ${color.link};
-  }
-`
 
 function useCollection(card: LiveMintCard) {
   const address = card.address as Address
@@ -175,7 +100,7 @@ function useMint(card: LiveMintCard, phaseId: number | undefined) {
   }
 }
 
-export default function LiveMintView({ card, onBack }: { card: LiveMintCard; onBack: () => void }) {
+export default function LiveMintView({ card }: { card: LiveMintCard }) {
   const { reads, live, isLoading, isError, refetch } = useCollection(card)
   const tx = useMint(card, reads?.phaseId)
   const { openConnectModal } = useConnectModal()
@@ -217,172 +142,93 @@ export default function LiveMintView({ card, onBack }: { card: LiveMintCard; onB
     if (tx.isConfirming) return off('Minting…')
     if (insufficient) return off('Not enough ETH')
     return {
-      label: `Mint ${quantity}`,
+      label: `Mint ${quantity} for ${formatEthShort(total)}`,
       disabled: live.price === undefined,
       onClick: () => live.price !== undefined && tx.mint(quantity, live.price),
     }
   })()
 
-  const [ref, { width }] = useElementSize()
-  const narrow = width > 0 && width <= 620
+  const status: MachineStatus | undefined = tx.isAwaitingWallet
+    ? { tone: 'info', body: 'Confirm the transaction in your wallet.' }
+    : tx.isConfirming
+    ? {
+        tone: 'info',
+        body: (
+          <>
+            Sent. Waiting for the chain to confirm.{' '}
+            <a href={txUrl} target="_blank" rel="noreferrer">
+              View transaction
+            </a>
+          </>
+        ),
+      }
+    : tx.reverted || (tx.error && !busy)
+    ? {
+        tone: err.cancelled ? 'info' : 'error',
+        alert: true,
+        body: tx.reverted
+          ? 'The mint did not go through. Someone may have minted first, so check what is left.'
+          : err.message,
+      }
+    : undefined
 
   return (
-    <Layout ref={ref} className={narrow ? 'narrow' : undefined}>
-      <Grid>
-        <Head>
-          <div>
-            <Eyebrow style={{ color: color.highlight, textShadow: `1px 1px 0 ${color.dark}` }}>
-              Mint · {live.chainName}
-            </Eyebrow>
-            <DisplayTitle>{live.name}</DisplayTitle>
-            <ArtistTag
-              artist={live.artist}
-              logo={live.artistLogo}
-              url={live.artistUrl}
-              address={live.artistAddress}
-              explorer={explorer}
-              style={{ color: color.highlight, textShadow: `1px 1px 0 ${color.dark}` }}
-            />
-          </div>
-          <div style={{ display: 'flex', gap: space[2], alignItems: 'center', flexWrap: 'wrap' }}>
-            {isError ? (
-              <Chip tone="warn">RPC unavailable</Chip>
-            ) : (
-              <StatusChip status={live.status} loading={isLoading} />
-            )}
-            <BackToMints onBack={onBack} />
-          </div>
-        </Head>
-
-        <Panel style={{ gridArea: 'preview' }} aria-label="Preview">
-          <Well style={{ padding: 3 }}>
-            <NftImage src={live.image || cover.data || undefined} alt={live.name} eager />
-          </Well>
-          {live.blurb && <Muted>{live.blurb}</Muted>}
-        </Panel>
-
-        <Panel style={{ gridArea: 'mint' }} aria-label="Mint">
-          <StatRow>
-            <span>Price</span>
-            {isLoading ? <Skeleton w="96px" h="18px" /> : <strong>{formatEthShort(live.price)}</strong>}
-          </StatRow>
-          <div style={{ display: 'flex', flexDirection: 'column', gap: space[2] }}>
-            <StatRow>
-              <span>Minted</span>
-              {isLoading ? (
-                <Skeleton w="96px" h="18px" />
-              ) : (
-                <strong>
-                  {live.minted ?? '–'} / {live.supply ?? '–'}
-                </strong>
-              )}
-            </StatRow>
-            <ProgressMeter value={live.minted || 0} max={live.supply || 1} label="Minted supply" />
-            {remaining !== undefined && <Muted>{remaining.toLocaleString()} left</Muted>}
-          </div>
-
-          <div style={{ display: 'flex', flexDirection: 'column', gap: space[2] }}>
-            <Eyebrow as="label" htmlFor="live-mint-qty">
-              Quantity
-            </Eyebrow>
-            <Stepper>
-              <button
-                type="button"
-                aria-label="Decrease quantity"
-                disabled={quantity <= 1 || busy}
-                onClick={() => setQuantity((q) => Math.max(1, q - 1))}
-              >
-                −
-              </button>
-              <input
-                id="live-mint-qty"
-                type="number"
-                inputMode="numeric"
-                min={1}
-                max={maxQty}
-                value={quantity}
-                disabled={busy}
-                onChange={(e) => {
-                  const n = Math.floor(Number(e.target.value))
-                  if (Number.isFinite(n)) setQuantity(Math.min(maxQty, Math.max(1, n)))
-                }}
-              />
-              <button
-                type="button"
-                aria-label="Increase quantity"
-                disabled={quantity >= maxQty || busy}
-                onClick={() => setQuantity((q) => Math.min(maxQty, q + 1))}
-              >
-                +
-              </button>
-            </Stepper>
-          </div>
-
-          <StatRow>
-            <span>Total</span>
-            <strong>{formatEthShort(total)}</strong>
-          </StatRow>
-
-          {tx.isConnected && tx.balance !== undefined && (
-            <StatRow>
-              <span>In your wallet</span>
-              <strong>{formatEthShort(tx.balance)}</strong>
-            </StatRow>
-          )}
-          {!tx.isConnected && <MintNeeds chainName={live.chainName} />}
-
-          <BigButton type="button" disabled={action.disabled} onClick={action.onClick}>
-            {action.label}
-          </BigButton>
-
-          {tx.isAwaitingWallet && (
-            <StatusBox tone="info" role="status">
-              <img src={LoadingHourglass} alt="" />
-              <span>Confirm the transaction in your wallet.</span>
-            </StatusBox>
-          )}
-          {tx.isConfirming && (
-            <StatusBox tone="info" role="status">
-              <img src={LoadingHourglass} alt="" />
-              <span>
-                Sent. Waiting for the chain to confirm.{' '}
-                <a href={txUrl} target="_blank" rel="noreferrer">
-                  View transaction
-                </a>
-              </span>
-            </StatusBox>
-          )}
-          {tx.isConfirmed && (
-            <StatusBox tone="ok" role="status">
-              <span>
-                Minted!{' '}
-                <a href={txUrl} target="_blank" rel="noreferrer">
-                  View transaction
-                </a>
-              </span>
-            </StatusBox>
-          )}
-          {(tx.reverted || (tx.error && !busy)) && (
-            <StatusBox tone={err.cancelled ? 'info' : 'error'} role="alert">
-              <span>{tx.reverted ? 'The transaction reverted.' : err.message}</span>
-            </StatusBox>
-          )}
-
-          <Muted>Price is per token, plus network fees.</Muted>
-          <Details>
-            <div>
-              <span>Contract</span>
-              <a href={`${explorer}/address/${card.address}`} target="_blank" rel="noreferrer">
-                {card.address?.slice(0, 6)}…{card.address?.slice(-4)}
+    <MintCart
+      name={live.name}
+      artist={
+        <ArtistTag
+          artist={live.artist}
+          logo={live.artistLogo}
+          url={live.artistUrl}
+          address={live.artistAddress}
+          explorer={explorer}
+          style={{ color: 'inherit' }}
+        />
+      }
+      lamps={[
+        isError ? { tone: 'warn', label: 'Can’t reach chain' } : statusLamp(live.status, isLoading),
+        { tone: 'off', label: live.chainName },
+      ]}
+      art={<NftImage src={live.image || cover.data || undefined} alt={live.name} eager />}
+      blurb={live.blurb}
+      price={formatEthShort(live.price)}
+      loading={isLoading}
+      minted={live.minted}
+      supply={live.supply}
+      left={remaining}
+      quantity={quantity}
+      maxQty={maxQty}
+      busy={busy}
+      onQuantity={setQuantity}
+      total={formatEthShort(total)}
+      balance={tx.isConnected && tx.balance !== undefined ? formatEthShort(tx.balance) : undefined}
+      action={action}
+      status={status}
+      needs={!tx.isConnected ? <MintNeeds chainName={live.chainName} /> : undefined}
+      dropped={
+        tx.isConfirmed ? (
+          <>
+            <strong>Minted!</strong>
+            <span>
+              It is in your wallet.{' '}
+              <a href={txUrl} target="_blank" rel="noreferrer">
+                View transaction
               </a>
-            </div>
-            <div>
-              <span>Chain</span>
-              <span>{live.chainName}</span>
-            </div>
-          </Details>
-        </Panel>
-      </Grid>
-    </Layout>
+            </span>
+          </>
+        ) : undefined
+      }
+      stamp={
+        <>
+          <span>
+            Contract{' '}
+            <a href={`${explorer}/address/${card.address}`} target="_blank" rel="noreferrer">
+              {card.address?.slice(0, 6)}…{card.address?.slice(-4)}
+            </a>
+          </span>
+          <span>{live.chainName}</span>
+        </>
+      }
+    />
   )
 }
