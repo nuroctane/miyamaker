@@ -636,7 +636,7 @@ export default function PoolView({
                     disabled={phase === 'waiting' || busy || wrongChain}
                     onClick={() => reveal(c)}
                   >
-                    {before !== undefined ? 'Settle earlier draw' : 'Reveal'}
+                    Reveal
                   </PushButton>
                 </li>
               )
