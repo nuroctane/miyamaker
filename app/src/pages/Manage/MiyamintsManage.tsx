@@ -1,7 +1,7 @@
 import { useEffect, useState } from 'react'
 import styled from 'styled-components/macro'
 import type { Address } from 'viem'
-import { isAddress } from 'viem'
+import { isAddress, parseAbi } from 'viem'
 import { useBalance, useReadContract, useReadContracts } from 'wagmi'
 
 import { Err, Field, Row2, SmallButton, SplitMeter } from '@/components/LaunchKit'
@@ -18,6 +18,14 @@ import { ethLabel } from '@/miyamints/split'
 import { useVaultInfo } from '@/miyamints/useMiyamints'
 import { txWords, useTx } from '@/miyamints/useTx'
 import { color, font, space, text } from '@/theme/tokens'
+
+import { cappedNote, dropWaiting, editionsWaiting } from './payout'
+
+/** The parked vault cut ERC721DropInstance.withdraw() leaves out of the payout (not in the shared drop ABI). */
+const dropPendingAbi = parseAbi(['function pendingVaultCut() view returns (uint256)'])
+
+/** Rows read per page in the Editions and Pieces tabs. */
+const PAGE = 50
 
 const Stack = styled.div`
   display: flex;
@@ -241,9 +249,11 @@ function AuctionPieces({
   explorer,
   call,
   isOwner,
+  more,
 }: Common & {
   call: CallFn
   ps: { tokenId: number; minBid: bigint; highBid: bigint; highBidder: Address; endTime: number; settled: boolean }[]
+  more: { note?: string; onMore: () => void }
 }) {
   const [img, setImg] = useState('')
   const [name, setName] = useState('')
@@ -318,6 +328,14 @@ function AuctionPieces({
           })}
         </tbody>
       </Table>
+      {more.note && (
+        <p>
+          {more.note}{' '}
+          <SmallButton type="button" onClick={more.onMore}>
+            Show more
+          </SmallButton>
+        </p>
+      )}
       {ps.map((x) => (
         <TxNote
           key={x.tokenId}
@@ -335,7 +353,10 @@ function AuctionPieces({
         <Field>
           Starting bid (ETH)
           <input value={reserve} inputMode="decimal" placeholder="0.1" onChange={(e) => setReserve(e.target.value)} />
-          <small>Paid now as a deposit; back to you when it sells.</small>
+          <small>
+            Paid now as a deposit. You get it back when the piece sells. If nobody bids, the deposit is lost: it goes
+            to the protocol when the piece is closed.
+          </small>
         </Field>
       </Row2>
       <Field>
@@ -380,10 +401,12 @@ function EditionsTab({
   address,
   chainId,
   isOwner,
+  more,
 }: Common & {
   eds: { id: bigint; pieceTitle: string; basePrice: bigint; supply: bigint; minted: bigint }[]
   address: Address
   chainId: SupportedChainId
+  more: { note?: string; onMore: () => void }
 }) {
   const [title, setTitle] = useState('')
   const [img, setImg] = useState('')
@@ -423,6 +446,14 @@ function EditionsTab({
           ))}
         </tbody>
       </Table>
+      {more.note && (
+        <p>
+          {more.note}{' '}
+          <SmallButton type="button" onClick={more.onMore}>
+            Show more
+          </SmallButton>
+        </p>
+      )}
       <Eyebrow>Add an edition</Eyebrow>
       <Row2>
         <Field>
@@ -502,6 +533,7 @@ export default function MiyamintsManage({
   isOwner: boolean
 }) {
   const [tab, setTab] = useState('overview')
+  const [limit, setLimit] = useState(PAGE)
   const explorer = explorerUrl(chainId)
   const a = miyamintsAddresses(chainId)
 
@@ -546,7 +578,7 @@ export default function MiyamintsManage({
   })
   const editions = useReadContracts({
     allowFailure: true,
-    contracts: ((editionIds.data as readonly bigint[] | undefined) || []).slice(0, 50).map((id) => ({
+    contracts: ((editionIds.data as readonly bigint[] | undefined) || []).slice(0, limit).map((id) => ({
       address,
       abi: erc1155InstanceAbi,
       functionName: 'getEdition' as const,
@@ -558,7 +590,7 @@ export default function MiyamintsManage({
   const pieceCount = kind === 'auction' ? Number((auctionReads.data?.[0]?.result as number | undefined) ?? 1) - 1 : 0
   const pieces = useReadContracts({
     allowFailure: true,
-    contracts: Array.from({ length: Math.min(pieceCount, 50) }, (_, i) => ({
+    contracts: Array.from({ length: Math.min(pieceCount, limit) }, (_, i) => ({
       address,
       abi: auctionInstanceAbi,
       functionName: 'getAuction' as const,
@@ -567,7 +599,17 @@ export default function MiyamintsManage({
     })),
     query: { enabled: kind === 'auction' && pieceCount > 0 },
   })
-  const balance = useBalance({ address, chainId })
+  const balance = useBalance({ address, chainId, query: { enabled: kind === 'drop' } })
+  const dropPending = useReadContracts({
+    allowFailure: true,
+    contracts: (['pendingVaultCut'] as const).map((functionName) => ({
+      address,
+      abi: dropPendingAbi,
+      functionName,
+      chainId,
+    })),
+    query: { enabled: kind === 'drop' },
+  })
 
   const refetchAll = () => {
     dropReads.refetch()
@@ -577,6 +619,7 @@ export default function MiyamintsManage({
     editions.refetch()
     pieces.refetch()
     balance.refetch()
+    dropPending.refetch()
   }
 
   const { tx, run, busy: sending, unconfirmed, reset } = useTx(() => refetchAll())
@@ -619,12 +662,27 @@ export default function MiyamintsManage({
       ? eds.reduce((s, e) => s + e.supply, 0n)
       : undefined
 
+  // What withdraw() would really pay; undefined when any read behind it failed.
   const waiting =
     kind === 'editions'
-      ? (r<bigint>(editionReads, 3) ?? 0n) - (r<bigint>(editionReads, 4) ?? 0n)
+      ? editionsWaiting(r<bigint>(editionReads, 3), r<bigint>(editionReads, 4))
       : kind === 'drop'
-      ? balance.data?.value ?? 0n
+      ? dropWaiting(
+          balance.data?.value,
+          dropPending.data?.[0]?.result as bigint | undefined
+        )
       : 0n
+  const waitingLoading =
+    kind === 'editions' ? editionReads.isLoading : kind === 'drop' ? balance.isLoading || dropPending.isLoading : false
+  const totalEditions = (editionIds.data as readonly bigint[] | undefined)?.length
+  const editionsMore = {
+    note: cappedNote(Math.min(limit, totalEditions ?? 0), totalEditions, 'editions'),
+    onMore: () => setLimit((n) => n + PAGE),
+  }
+  const piecesMore = {
+    note: cappedNote(Math.min(limit, pieceCount), pieceCount, 'pieces'),
+    onMore: () => setLimit((n) => n + PAGE),
+  }
 
   const call = (fn: string, args: unknown[] = [], extra: Record<string, unknown> = {}) => ({
     address,
@@ -643,7 +701,7 @@ export default function MiyamintsManage({
         {kind !== 'auction' && (
           <>
             <dt>Sales waiting</dt>
-            <dd>{ethLabel(waiting)}</dd>
+            <dd>{waiting !== undefined ? ethLabel(waiting) : waitingLoading ? '…' : "Couldn't check"}</dd>
           </>
         )}
         <dt>Vault</dt>
@@ -671,10 +729,16 @@ export default function MiyamintsManage({
         <div style={{ display: 'flex', flexDirection: 'column', gap: space[1] }}>
           <BigButton
             type="button"
-            disabled={busy || waiting === 0n || (kind === 'editions' && !isOwner)}
-            onClick={() => run('withdraw', call('withdraw', kind === 'editions' ? [waiting] : []))}
+            disabled={busy || waiting === undefined || waiting === 0n || !isOwner}
+            onClick={() => waiting && run('withdraw', call('withdraw', kind === 'editions' ? [waiting] : []))}
           >
-            {waiting === 0n ? 'Nothing to pay out yet' : `Pay out ${ethLabel(waiting)}`}
+            {waiting === undefined
+              ? waitingLoading
+                ? 'Checking sales…'
+                : "Couldn't check sales. Try again later."
+              : waiting === 0n
+              ? 'Nothing to pay out yet'
+              : `Pay out ${ethLabel(waiting)}`}
           </BigButton>
           <small style={{ color: color.inkMuted }}>Splits the sales as shown above and sends your part to you.</small>
           <TxNote tx={tx} id="withdraw" explorer={explorer} />
@@ -723,7 +787,7 @@ export default function MiyamintsManage({
               {
                 title: 'Pieces',
                 id: 'pieces',
-                children: <AuctionPieces {...{ ps, run, busy, tx, explorer, call, isOwner }} />,
+                children: <AuctionPieces {...{ ps, run, busy, tx, explorer, call, isOwner }} more={piecesMore} />,
               },
             ]
           : []),
@@ -732,7 +796,7 @@ export default function MiyamintsManage({
               {
                 title: 'Editions',
                 id: 'editions',
-                children: <EditionsTab {...{ eds, run, busy, tx, explorer, address, chainId, isOwner }} />,
+                children: <EditionsTab {...{ eds, run, busy, tx, explorer, address, chainId, isOwner }} more={editionsMore} />,
               },
             ]
           : []),

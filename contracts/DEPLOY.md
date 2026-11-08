@@ -1,7 +1,40 @@
 # Deploying miyamints
 
+This branch is the live site. Never deploy contracts from it; deploy from main.
+
 One script, `script/DeployMiyamints.s.sol`, deploys and wires everything the app needs on one chain, including the
 music drops (ERC1155 editions). Markets (`src/markets`) are not part of this deployment.
+
+## Release rules
+
+- **Deploy from `main` only**, through `script/deploy.sh` (or from a release tag with `DEPLOY_TAG=<tag>`). It refuses a
+  dirty tree, untracked files, submodules off their recorded commits, any branch but `main`, and a `main` that isn't
+  `origin/main`. The Solidity script refuses `--broadcast` unless `deploy.sh` set `DEPLOY_GIT_COMMIT`, and writes that
+  commit (`gitCommit`, `gitRef`) and the `chainId` into `deployments/<chainId>.json`. That file is the record of which
+  source is on chain: verify against that commit.
+- **Ship the app that matches these ABIs in the same release.** `deploy/live` still carries an older app whose
+  hand-written ABIs don't match these contracts: `createDrop` with 9 params (no `ownerReserve`), `Phase` without
+  `supplyCap` (`setPhases`, `phases()`), and `MiyaPool.commits` read as `snapshot` where the contract returns `queueEnd`
+  (and no escrow / `nextRevealId`). Calls from that app would revert or misread. Merge the app from `main` to
+  `deploy/live` together with the deployment.
+- **Don't set `VITE_*` addresses on `deploy/live`** (and don't commit `deployments/<chainId>.json` to it) before its
+  app matches. `app/tests/abi-drift.test.mts` (`yarn test`) must pass on the branch being released.
+- **The compiler is pinned to solc 0.8.28** (`foundry.toml`, default and deploy profiles). The two tests that need
+  v4-core's real `PoolManager` (`=0.8.26`) live in `test/v4real/` and run with `FOUNDRY_PROFILE=v4real forge test`
+  (built into `out-v4real/`, never mixed with the production artifacts). Run both before a release.
+
+## ABI snapshots (`contracts/abi/`)
+
+`contracts/abi/*.json` are the ABIs of the contracts the app calls, generated from the 0.8.28 build, so the app's
+drift test runs in CI without forge. After any change to a contract's external interface:
+
+```sh
+cd contracts && script/export-abis.sh        # forge build + rewrite abi/*.json; commit the result
+cd ../app && yarn test                       # abi-drift.test.mts: the app's ABIs against the snapshots
+```
+
+`script/export-abis.sh --check` fails when the snapshots are older than the source (for CI that has forge). To add a
+contract, add it to the list in `export-abis.sh` and to `MAP` in `app/tests/abi-drift.test.mts`.
 
 ## What it deploys, in order
 
@@ -23,8 +56,10 @@ music drops (ERC1155 editions). Markets (`src/markets`) are not part of this dep
 
 Then it asserts the wiring (factories/vault factory/components registered, target active, vault registered,
 owners, treasury, fee bps, validator and vault-factory parameters, the vault's pool key and treasury), prints the
-addresses and the app env lines, and writes `deployments/<chainId>.json` (broadcast only; a dry run writes the
-gitignored `deployments/<chainId>.dryrun.local.json`).
+addresses and the app env lines, and writes `deployments/<chainId>.json` with `chainId`, `gitCommit` and `gitRef`
+(broadcast only; a dry run writes the gitignored `deployments/<chainId>.dryrun.local.json`). Dry-run files are local
+scratch and go stale: one from before 2026-11-04 still names CULT as the alignment token where the config now says
+INFER. Delete it, or re-run the dry run, rather than reading addresses from it.
 
 **Addressing.** The factories already deploy collections and vaults with CreateX CREATE3, and `MiyaPoolFactory`
 assumes the same address on every chain, so contracts that take their owner as an argument or have none use CreateX
@@ -48,47 +83,68 @@ produced identical addresses). Re-running with the same deployer and namespace r
 | v2 factory (validator) | `0x5C69…aA6f` (pairs under 10 WETH ignored) | none on chain | `0xF62c…80E6` |
 | CreateX / Permit2 | canonical, verified | canonical, verified | canonical, verified |
 | treasury | imdUSD Treasury `0x6Ac8…7Bc` | **unset: `TREASURY` required** | deployer if unset |
-| default alignment token | CULT `0x0000…eCa4` | USDG `0x5fc5…1168` (placeholder) | test token |
+| default alignment token | INFER `0x53d0…7921` (seed its pool first) | USDG `0x5fc5…1168` (placeholder) | test token |
 
 ## Env
 
 | Var | Required | Meaning |
 |---|---|---|
 | `OWNER` | strongly recommended | Final owner (a Safe on that chain). Unset = the deployer keeps ownership and the script prints a loud warning. |
+| `KEEPER` | strongly recommended | The only address that can run vault swaps (`MiyaRegistry.conversionKeeper`). Unset = conversions stay paused until the owner calls `setConversionKeeper`. |
 | `TREASURY` | 4663: yes | Overrides config `treasury`. On 4663 the mainnet imdUSD Treasury address has no code. |
-| `ALIGNMENT_TOKEN`, `ALIGNMENT_TARGET_NAME` | no | Override the default vault's token / target name. Needs a hookless native-ETH v4 pool at the config fee tier with liquidity, else the script stops (`ALLOW_MISSING_POOL=true` to bypass). |
+| `ALIGNMENT_TOKEN`, `ALIGNMENT_TARGET_NAME` | no | Override the default vault's token / target name. Needs a hookless native-ETH v4 pool at the config fee tier with liquidity, else the script stops and names the token, fee and tick spacing. |
+| `ALLOW_MISSING_POOL` | no | `true` skips the pool check (default on Sepolia's test token only). On 1 / 4663 it prints a loud warning: the default vault can't convert until the pool exists, and anyone can initialize it first at any price. |
 | `PROTOCOL_FEE_BPS`, `MIN_ALIGNMENT_BPS` | no | Defaults 100 (1%, max 500) and 1000 (10%). |
 | `SALT_NAMESPACE` | no | CREATE3 salt namespace, default `miyamints.v1`. |
 | `DEPLOY_GATING_MODULE` | no | Default false. |
 | `DEPLOYER_PRIVATE_KEY` | no | Only if you cannot use `--account`/`--ledger`. Read with `vm.envUint`, never printed. |
 | `MAINNET_RPC_URL`, `FORK_BLOCK`, `SKIP_FORK_TESTS` | tests | Fork test RPC (default publicnode), optional pinned block, opt-out. |
+| `SEED_POOL` | tests | `1` lets the fork test seed its own ETH/INFER pool when mainnet has none. Without it the fork test fails while the real pool is uninitialized, as the deploy would. |
+| `DEPLOY_GIT_COMMIT`, `DEPLOY_GIT_REF`, `DEPLOY_TAG` | deploy | Set by `script/deploy.sh` (don't set the first two by hand). `DEPLOY_TAG` deploys a release tag instead of `main`. |
 | `ETHERSCAN_API_KEY` | verify | Etherscan v2 key (also covers Sepolia). |
 
 ## Runbook
 
-1. **Prepare.** `git submodule update --init --recursive`; `forge test` (the fork test runs the script on a
-   mainnet fork and smoke-tests every factory). Create a fresh deployer and import it into a keystore:
+**Robinhood Chain: no RANDOM pools.** `blockhash` on Arbitrum-based chains is documented as insecure randomness
+(AUDIT-NOTES.md), so `MiyaPoolFactory` refuses them on 4663. Keep the app from offering them there.
+
+**Run the fork tests for real.** Set `REQUIRE_FORK_TESTS=true` before deploying, or a machine without an RPC skips them and
+reports green. Don't set `SEED_POOL` for the pre-deploy run: it must pass against the real pool.
+
+**Precondition: the INFER/ETH v4 pool is not initialized on mainnet** (slot0 empty at block 26,367,291 on 2026-11-07: hookless, native ETH, fee
+10000, tick spacing 200, `config/1.json`). Until it is seeded, the mainnet deploy stops at its pool check and the fork
+test fails (unless `SEED_POOL=1`).
+
+**Seed the alignment pool in one transaction, then check it.** `PoolManager.initialize` is open to anyone, so an unseeded
+pool can be initialized first at any price. Initialize and add liquidity atomically (one call through a position manager
+or your own contract), with a price limit. If someone got there first, trade the pool to the market price before adding
+anything. Seed it deep against your conversion batches. The script stops below `minPoolEth` of depth and prints the
+pool's depth and price: compare the price with the market before you broadcast, because no check here can know it.
+
+1. **Prepare.** `git checkout main && git pull`; `git submodule update --init --recursive`; `forge test`
+   (the fork test runs the script on a mainnet fork and smoke-tests every factory), `FOUNDRY_PROFILE=v4real forge
+   test`, `script/export-abis.sh --check`, and `cd ../app && yarn test`. Create a fresh deployer and import it into a keystore:
    `cast wallet import miyamints-deployer --interactive` (or use a Ledger). Fund it: about 31.4M gas in total (16
    transactions, the largest about 5.4M), so 0.03 ETH covers 1 gwei; at the 2026-11-01 base fee (~0.033 gwei) it
    is about 0.002 ETH. Same order on 4663 (L1 data fees extra).
 2. **Create the Safe** that will own the system on each chain and note its address (`OWNER`). On 4663, also pick
    the `TREASURY`.
-3. **Dry run** (no `--broadcast`):
+3. **Dry run** (no `--broadcast`), from the same clean `main`:
    ```sh
    cd contracts
-   OWNER=0xSafe forge script script/DeployMiyamints.s.sol \
+   OWNER=0xSafe KEEPER=0xKeeper script/deploy.sh \
      --fork-url https://ethereum-rpc.publicnode.com --account miyamints-deployer --sender 0xDeployer
    ```
    Check the printed addresses, owner and treasury. Robinhood: add `TREASURY=0x...` and use
    `--fork-url https://rpc.mainnet.chain.robinhood.com`.
 4. **Broadcast + verify, Ethereum:**
    ```sh
-   OWNER=0xSafe forge script script/DeployMiyamints.s.sol --rpc-url https://ethereum-rpc.publicnode.com \
+   OWNER=0xSafe KEEPER=0xKeeper script/deploy.sh --rpc-url https://ethereum-rpc.publicnode.com \
      --account miyamints-deployer --sender 0xDeployer --broadcast --verify --etherscan-api-key $ETHERSCAN_API_KEY
    ```
    (`--ledger --sender 0x...` instead of `--account` for a hardware wallet.) Robinhood Chain (Blockscout):
    ```sh
-   OWNER=0xSafe TREASURY=0x... forge script script/DeployMiyamints.s.sol \
+   OWNER=0xSafe KEEPER=0xKeeper TREASURY=0x... script/deploy.sh \
      --rpc-url https://rpc.mainnet.chain.robinhood.com --account miyamints-deployer --sender 0xDeployer --broadcast \
      --verify --verifier blockscout --verifier-url https://robinhoodchain.blockscout.com/api/
    ```
@@ -102,7 +158,7 @@ produced identical addresses). Re-running with the same deployer and namespace r
    factory, auction factory, 1155 factory and dynamic pricing module. If you deployed without `OWNER`, do it now
    from the deployer: `cast send <each> "transferOwnership(address)" 0xSafe --account miyamints-deployer`. Drop
    factory, pool factory and price validator are ownerless; vaults are owned by the vault factory.
-7. **Commit `deployments/<chainId>.json`.** The app bundles it (`app/src/constants/contracts.ts`), so music drops
+7. **Commit `deployments/<chainId>.json`** (to `main`, then release it with the matching app; see Release rules). The app bundles it (`app/src/constants/contracts.ts`), so music drops
    and the other miyamints addresses work without env. Or set the printed env lines (Vercel / `app/.env.local`):
    `VITE_MUSIC_FACTORY_<id>`, `VITE_MUSIC_VAULT_<id>` (read by the app today), plus `VITE_MIYA_REGISTRY_<id>`,
    `VITE_ERC721_DROP_FACTORY_<id>`, `VITE_ERC721_AUCTION_FACTORY_<id>`, `VITE_MIYA_POOL_FACTORY_<id>`,
@@ -116,13 +172,15 @@ produced identical addresses). Re-running with the same deployer and namespace r
 - **Deployer key**: a fresh keystore account or Ledger (`--account` / `--ledger`). Nothing is hardcoded.
 - **`OWNER` Safe per chain** (1 and 4663). The mainnet governance Safe has no code on 4663.
 - **`TREASURY` on 4663.** Mainnet uses the imdUSD Treasury `0x6Ac8fF96Fb8DCF5d79A8eF1E59D9AC23f2BD27Bc`.
-- **Default alignment token (mainnet): CULT** (Remilia's Milady Cult Coin, `0x0000000000c5dc95539589fbD24BE07c6C14eCa4`).
-  Why: the tests name the target "Remilia", the legacy app aligned to Milady (NFTX vault 392), and CULT is the only
-  ecosystem candidate with a hookless native-ETH v4 pool. INFER, the miyanet token, has no ETH v4 pool, so a vault for
-  it could not convert. Override with `ALIGNMENT_TOKEN` once INFER (or anything else) has one.
-- **Vault fee tier is factory-wide and immutable**: mainnet uses 1% / 200 because the CULT 0.3% pool has zero
-  liquidity. Every vault from this factory swaps and LPs at 1%. A different tier means a second vault factory.
-- **4663 default alignment token: USDG, a placeholder.** There is no CULT or INFER on 4663. Pick a real target before
+- **Default alignment token (mainnet): INFER** (`0x53d0eA0A685220718Dc6a0a6e4617194C6F37921`). INFER trades through
+  IMD and has no ETH pool, so **a hookless native-ETH v4 pool at 1% / tick spacing 200 must be seeded before deploying**;
+  the script stops at its pool check otherwise. Pool depth limits what each conversion can swap without heavy slippage.
+- **Keeper**: `KEEPER` runs `convertAndAddLiquidity` and `convertFeeTokens`, through a private mempool, with minimum
+  outputs from a live quote. A new pool has no reference price, so nothing on chain can check those floors. If the
+  keeper stops, vault ETH and fee tokens wait (nothing is lost) until the owner sets a new one.
+- **Vault fee tier is factory-wide and immutable**: every vault from this factory swaps and LPs at 1%. A different tier
+  means a second vault factory.
+- **4663 default alignment token: USDG, a placeholder.** There is no INFER on 4663. Pick a real target before
   broadcasting there (it needs an ETH v4 pool at 0.3%, or change `zRouterFee` in `config/4663.json`).
 - **Fees**: protocol 1% (`PROTOCOL_FEE_BPS`), minimum alignment 10% (`MIN_ALIGNMENT_BPS`), matching the plan.
 - **Gating module is off by default.** `PasswordTierGatingModule.configureFor` only accepts a first configuration
@@ -132,9 +190,7 @@ produced identical addresses). Re-running with the same deployer and namespace r
 ## Fixed: dust v2 pairs blocked vault conversion
 
 `UniswapVaultPriceValidator.validatePrice` used to revert `PriceDeviationTooHigh` whenever a token had both a v2 pair
-and a v3 pool whose prices disagreed. Mainnet CULT has a dust v2 pair (0.000004 WETH / 98 CULT), and anyone can make
+and a v3 pool whose prices disagreed. A token with a dust v2 pair hit this, and anyone can make
 one for any token for almost nothing, so this was a cheap way to block every vault's conversions. Since 2026-11-02 a
-v2 pair only counts as a price reference once it holds `MIN_V2_REFERENCE_WETH` (10 ETH, the same floor as the v2-only
-route). The mainnet config uses the real v2 factory again, and the fork test converts real ETH through the CULT v4 pool
-with the dust pair present. A dust v3 pool is the same class of problem and stays with the open M2 (sandwich/TWAP)
-finding in AUDIT-NOTES.md.
+v2 pair only counts as a price reference once it holds `MIN_REFERENCE_WETH` (10 ETH, the same floor as the v2-only
+route). The mainnet config uses the real v2 factory again. `validatePrice` is now a backstop only: see M2 in AUDIT-NOTES.md.

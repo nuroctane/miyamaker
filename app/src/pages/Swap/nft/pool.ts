@@ -164,7 +164,8 @@ export type PoolSummary = {
   symbol: string
   name: string
   collectionName?: string
-  held: bigint
+  /** NFTs (or ERC1155 units) in the pool; undefined when the read failed. */
+  held?: bigint
 }
 
 /** Pools whose name, ticker, collection name or addresses match `query` (case-insensitive). */
@@ -179,3 +180,40 @@ export function filterPools<T extends PoolSummary>(pools: T[], query: string): T
 /** The pool name without the contract's "miya pool: " prefix. */
 export const poolTitle = (p: Pick<PoolSummary, 'name' | 'collectionName' | 'collection'>) =>
   p.collectionName || p.name.replace(/^miya pool:\s*/i, '') || `${p.collection.slice(0, 6)}…${p.collection.slice(-4)}`
+
+/**
+ * Which redeem modes still have no pool, from the factory's poolOf reads per mode. A mode whose read gave no answer
+ * (`undefined`) is neither free nor taken: it goes in `unknown`, so a failed read never offers a duplicate pool.
+ */
+export function freeModesFrom(
+  poolOf: readonly (string | undefined)[],
+  modes: readonly PoolMode[],
+  zero = '0x0000000000000000000000000000000000000000'
+): { free: PoolMode[]; unknown: PoolMode[] } {
+  const free: PoolMode[] = []
+  const unknown: PoolMode[] = []
+  for (const m of modes) {
+    const a = poolOf[m]
+    if (a === undefined) unknown.push(m)
+    else if (a.toLowerCase() === zero) free.push(m)
+  }
+  return { free, unknown }
+}
+
+/** NFTs in a pool not promised to an open draw; undefined when either read failed. */
+export function freeUnits(held: bigint | undefined, pending: bigint | undefined): number | undefined {
+  if (held === undefined || pending === undefined) return undefined
+  return held > pending ? Number(held - pending) : 0
+}
+
+/**
+ * What useOwnership knows per id: the amount held, or `undefined` when the read gave no answer. A revert from
+ * ownerOf / balanceOf is a real "not held" (0n); an RPC failure is not.
+ */
+export type HeldRead = { status: 'success'; result: unknown } | { status: 'failure'; reverted: boolean }
+export function heldAmount(r: HeldRead | undefined, erc721: boolean, owner: string | undefined): bigint | undefined {
+  if (!r) return undefined
+  if (r.status !== 'success') return r.reverted ? 0n : undefined
+  if (erc721) return String(r.result).toLowerCase() === owner?.toLowerCase() ? 1n : 0n
+  return typeof r.result === 'bigint' ? r.result : undefined
+}
